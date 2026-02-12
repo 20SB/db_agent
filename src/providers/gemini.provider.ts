@@ -1,5 +1,5 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
-import { LLMProvider } from "../types";
+import { GoogleGenerativeAI, Content } from "@google/generative-ai";
+import { LLMProvider, ConversationTurn } from "../types";
 import { buildSystemPrompt, buildSummaryPrompt } from "./llm.interface";
 
 const MODEL = "gemini-2.0-flash";
@@ -13,22 +13,36 @@ export class GeminiProvider implements LLMProvider {
     this.client = new GoogleGenerativeAI(apiKey);
   }
 
-  async generateSQL(schema: string, question: string): Promise<string> {
+  private toGeminiHistory(history: ConversationTurn[]): Content[] {
+    return history.map((t) => ({
+      role: t.role === "assistant" ? "model" : "user",
+      parts: [{ text: t.content }],
+    }));
+  }
+
+  async generateSQL(
+    schema: string,
+    question: string,
+    history: ConversationTurn[]
+  ): Promise<string> {
     const model = this.client.getGenerativeModel({
       model: MODEL,
       systemInstruction: buildSystemPrompt(schema),
     });
-    const result = await model.generateContent(question);
+    const chat = model.startChat({ history: this.toGeminiHistory(history) });
+    const result = await chat.sendMessage(question);
     return result.response.text().trim();
   }
 
   async summarizeResults(
     question: string,
     sql: string,
-    rows: Record<string, unknown>[]
+    rows: Record<string, unknown>[],
+    history: ConversationTurn[]
   ): Promise<string> {
     const model = this.client.getGenerativeModel({ model: MODEL });
-    const result = await model.generateContent(buildSummaryPrompt(question, sql, rows));
+    const chat = model.startChat({ history: this.toGeminiHistory(history) });
+    const result = await chat.sendMessage(buildSummaryPrompt(question, sql, rows));
     return result.response.text().trim();
   }
 }

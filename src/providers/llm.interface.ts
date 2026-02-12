@@ -1,4 +1,4 @@
-import { LLMProvider } from "../types";
+import { ConversationTurn } from "../types";
 
 export function buildSystemPrompt(schema: string): string {
   return [
@@ -8,6 +8,7 @@ export function buildSystemPrompt(schema: string): string {
     "- Output ONLY the raw SQL. No markdown, no explanation, no code fences.",
     "- Never use INSERT, UPDATE, DELETE, DROP, ALTER, or TRUNCATE.",
     "- Always include a LIMIT clause (max 50) unless the user explicitly specifies one.",
+    "- Use conversation history to resolve references like 'those', 'that table', 'group it by', etc.",
     "",
     "Database schema:",
     schema,
@@ -31,4 +32,10 @@ export function buildSummaryPrompt(
   ].join("\n");
 }
 
-export type { LLMProvider };
+export function formatHistory(
+  history: ConversationTurn[]
+): { role: "user" | "assistant"; content: string }[] {
+  return history.map((t) => ({ role: t.role, content: t.content }));
+}
+
+export type { ConversationTurn };

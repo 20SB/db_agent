@@ -5,11 +5,12 @@ import * as readline from "readline";
 
 dotenv.config({ path: path.resolve(__dirname, "../.env") });
 
-import { LLMProvider, AgentResult } from "./types";
+import { LLMProvider, AgentResult, ConversationTurn } from "./types";
 import { GeminiProvider } from "./providers/gemini.provider";
 import { AnthropicProvider } from "./providers/anthropic.provider";
 import { validateSQL } from "./sqlValidator";
 import { executeQuery, closePool } from "./db";
+import { estimateQueryCost } from "./costEstimator";
 
 // ── Provider factory ────────────────────────────────────────────────
 function createProvider(): LLMProvider {
@@ -39,69 +40,113 @@ function loadSchema(): string {
 }
 
 // ── Core agent pipeline ─────────────────────────────────────────────
-async function runAgent(question: string): Promise<AgentResult> {
-  const llm = createProvider();
-  const schema = loadSchema();
-
+async function runAgent(
+  question: string,
+  llm: LLMProvider,
+  schema: string,
+  history: ConversationTurn[]
+): Promise<AgentResult> {
   // Step 1 — Generate SQL
-  console.log("[1/4] Generating SQL…");
-  const rawSQL = await llm.generateSQL(schema, question);
+  console.log("\n[1/5] Generating SQL…");
+  const rawSQL = await llm.generateSQL(schema, question, history);
 
   // Step 2 — Validate
-  console.log("[2/4] Validating SQL…");
+  console.log("[2/5] Validating SQL…");
   const sql = validateSQL(rawSQL);
   console.log(`[sql]  ${sql}`);
 
-  // Step 3 — Execute
-  console.log("[3/4] Executing query…");
+  // Step 3 — Cost estimate
+  console.log("[3/5] Estimating query cost…");
+  const cost = await estimateQueryCost(sql);
+  console.log(`[cost] ${cost.plan_summary}`);
+
+  // Step 4 — Execute
+  console.log("[4/5] Executing query…");
   const rows = await executeQuery(sql);
   console.log(`[rows] ${rows.length} row(s) returned`);
 
-  // Step 4 — Summarize
-  console.log("[4/4] Summarizing results…");
-  const summary = await llm.summarizeResults(question, sql, rows);
+  // Step 5 — Summarize
+  console.log("[5/5] Summarizing results…");
+  const summary = await llm.summarizeResults(question, sql, rows, history);
 
   return {
     generated_sql: sql,
+    query_cost: cost,
     row_count: rows.length,
     answer_summary: summary,
     raw_data_preview: rows.slice(0, 10),
   };
 }
 
+// ── Interactive REPL ────────────────────────────────────────────────
+async function startREPL(llm: LLMProvider, schema: string): Promise<void> {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  const history: ConversationTurn[] = [];
+
+  console.log("DB Agent — interactive mode (type 'exit' or 'quit' to stop)\n");
+
+  const ask = (): void => {
+    rl.question("You: ", async (input) => {
+      const question = input.trim();
+      if (!question || ["exit", "quit"].includes(question.toLowerCase())) {
+        console.log("Goodbye!");
+        rl.close();
+        await closePool();
+        return;
+      }
+
+      try {
+        const result = await runAgent(question, llm, schema, history);
+
+        // Update conversation memory
+        history.push({ role: "user", content: question });
+        history.push({
+          role: "assistant",
+          content: `SQL: ${result.generated_sql}\nAnswer: ${result.answer_summary}`,
+        });
+
+        // Keep memory bounded — last 20 turns (10 Q&A pairs)
+        while (history.length > 20) history.splice(0, 2);
+
+        console.log("\n" + JSON.stringify(result, null, 2) + "\n");
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[error] ${message}\n`);
+      }
+
+      ask();
+    });
+  };
+
+  ask();
+}
+
 // ── CLI entrypoint ──────────────────────────────────────────────────
 async function main(): Promise<void> {
-  // Accept question as CLI arg or prompt interactively
-  let question = process.argv.slice(2).join(" ").trim();
+  const llm = createProvider();
+  const schema = loadSchema();
+  const question = process.argv.slice(2).join(" ").trim();
 
-  if (!question) {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
-    question = await new Promise<string>((resolve) =>
-      rl.question("Ask a question about your database: ", (ans) => {
-        rl.close();
-        resolve(ans.trim());
-      })
-    );
+  // Single-shot mode: pass question as CLI arg
+  if (question) {
+    try {
+      const result = await runAgent(question, llm, schema, []);
+      console.log("\n" + JSON.stringify(result, null, 2));
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[error] ${message}`);
+      process.exit(1);
+    } finally {
+      await closePool();
+    }
+    return;
   }
 
-  if (!question) {
-    console.error("No question provided. Exiting.");
-    process.exit(1);
-  }
-
-  try {
-    const result = await runAgent(question);
-    console.log("\n" + JSON.stringify(result, null, 2));
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`[error] ${message}`);
-    process.exit(1);
-  } finally {
-    await closePool();
-  }
+  // Interactive REPL mode: no arg — start conversation loop
+  await startREPL(llm, schema);
 }
 
 main();
