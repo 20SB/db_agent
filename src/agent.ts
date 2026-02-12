@@ -11,6 +11,7 @@ import { AnthropicProvider } from "./providers/anthropic.provider";
 import { validateSQL } from "./sqlValidator";
 import { executeQuery, closePool } from "./db";
 import { estimateQueryCost } from "./costEstimator";
+import { formatResult } from "./formatter";
 
 // ── Provider factory ────────────────────────────────────────────────
 function createProvider(): LLMProvider {
@@ -111,7 +112,7 @@ async function startREPL(llm: LLMProvider, schema: string): Promise<void> {
         // Keep memory bounded — last 20 turns (10 Q&A pairs)
         while (history.length > 20) history.splice(0, 2);
 
-        console.log("\n" + JSON.stringify(result, null, 2) + "\n");
+        console.log(formatResult(result));
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`[error] ${message}\n`);
@@ -134,7 +135,7 @@ async function main(): Promise<void> {
   if (question) {
     try {
       const result = await runAgent(question, llm, schema, []);
-      console.log("\n" + JSON.stringify(result, null, 2));
+      console.log(formatResult(result));
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[error] ${message}`);
