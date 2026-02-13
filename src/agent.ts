@@ -14,6 +14,7 @@ import { executeQuery, closePool } from "./db";
 import { estimateQueryCost } from "./costEstimator";
 import { formatResult } from "./formatter";
 import { smartRetry } from "./smartRetry";
+import { getLearningsForPrompt } from "./learnings";
 
 // ── Provider factory ────────────────────────────────────────────────
 export function createProvider(): LLMProvider {
@@ -112,9 +113,13 @@ export async function runAgent(
     if (onProgress) onProgress(step, detail);
   };
 
+  // Enrich schema with past learnings so LLM avoids known mistakes
+  const learningsCtx = getLearningsForPrompt();
+  const enrichedSchema = learningsCtx ? schema + learningsCtx : schema;
+
   // Step 1 — Generate SQL
   emit("[1/5] Generating SQL…", "thinking");
-  const rawSQL = await llm.generateSQL(schema, question, history);
+  const rawSQL = await llm.generateSQL(enrichedSchema, question, history);
   console.log("rawSQL", rawSQL);
 
   // Step 2 — Validate

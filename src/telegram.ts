@@ -1,6 +1,10 @@
 import TelegramBot from "node-telegram-bot-api";
 import { LLMProvider, ConversationTurn, AgentResult } from "./types";
 import { runAgent } from "./agent";
+import { validateSQL } from "./sqlValidator";
+import { executeQuery } from "./db";
+import { estimateQueryCost } from "./costEstimator";
+import { addLearning, getLearningsSummary, removeLearning } from "./learnings";
 
 // ── Status icons for each pipeline phase ────────────────────────────
 const STEP_ICONS: Record<string, string> = {
@@ -12,6 +16,16 @@ const STEP_ICONS: Record<string, string> = {
   summarizing: "✍️ Summarizing results...",
   done: "✅ Done!",
 };
+
+// ── Pending hint state per chat ─────────────────────────────────────
+interface PendingHint {
+  question: string;
+  failedSQL: string;
+  schema: string;
+  llm: LLMProvider;
+  history: ConversationTurn[];
+  attempts: number;
+}
 
 // ── Build the live status message with step trail ───────────────────
 function buildStatusText(steps: string[]): string {
@@ -119,6 +133,19 @@ function splitMessage(text: string, maxLen: number): string[] {
   return chunks;
 }
 
+// ── Send result to chat ─────────────────────────────────────────────
+async function sendResult(bot: TelegramBot, chatId: number, result: AgentResult): Promise<void> {
+  const response = formatTelegramResult(result);
+  const chunks = splitMessage(response, 4096);
+  for (const chunk of chunks) {
+    try {
+      await bot.sendMessage(chatId, chunk);
+    } catch (sendErr) {
+      console.error("[telegram] Failed to send result chunk:", sendErr);
+    }
+  }
+}
+
 // ── Telegram bot ────────────────────────────────────────────────────
 export function startTelegramBot(llm: LLMProvider, schema: string): void {
   const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -129,30 +156,53 @@ export function startTelegramBot(llm: LLMProvider, schema: string): void {
 
   const bot = new TelegramBot(token, { polling: true });
 
-  // Per-chat conversation history
+  // Per-chat state
   const chatHistories = new Map<number, ConversationTurn[]>();
-  // Track chats with an active request to prevent overlapping
   const activeChatRequests = new Set<number>();
+  const pendingHints = new Map<number, PendingHint>();
 
   console.log("[telegram] Bot is running. Waiting for messages...");
 
+  // ── /start command ──────────────────────────────────────────────
   bot.onText(/\/start/, (msg) => {
     bot.sendMessage(
       msg.chat.id,
       "🤖 DB Agent Bot\n\n" +
         "Ask me anything about your database in plain English.\n" +
         "I'll generate SQL, run it, and give you a summary.\n\n" +
+        "When I get 0 results, you can teach me with a hint — I'll remember it!\n\n" +
         "Commands:\n" +
         "/start — Show this message\n" +
-        "/clear — Clear conversation history",
+        "/clear — Clear conversation history\n" +
+        "/learnings — View saved learnings\n" +
+        "/forget <number> — Remove a learning by number",
     );
   });
 
+  // ── /clear command ──────────────────────────────────────────────
   bot.onText(/\/clear/, (msg) => {
     chatHistories.delete(msg.chat.id);
+    pendingHints.delete(msg.chat.id);
     bot.sendMessage(msg.chat.id, "🗑 Conversation history cleared.");
   });
 
+  // ── /learnings command ──────────────────────────────────────────
+  bot.onText(/\/learnings/, (msg) => {
+    const summary = getLearningsSummary();
+    bot.sendMessage(msg.chat.id, `🧠 Learnings:\n\n${summary}`);
+  });
+
+  // ── /forget command ─────────────────────────────────────────────
+  bot.onText(/\/forget\s+(\d+)/, (msg, match) => {
+    const index = parseInt(match![1], 10);
+    if (removeLearning(index)) {
+      bot.sendMessage(msg.chat.id, `🗑 Learning #${index} removed.`);
+    } else {
+      bot.sendMessage(msg.chat.id, `❌ Invalid learning number. Use /learnings to see the list.`);
+    }
+  });
+
+  // ── Main message handler ────────────────────────────────────────
   bot.on("message", async (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text?.trim();
@@ -160,20 +210,120 @@ export function startTelegramBot(llm: LLMProvider, schema: string): void {
     // Skip commands and empty messages
     if (!text || text.startsWith("/")) return;
 
-    // Prevent overlapping requests per chat
+    // ── Handle pending hint (user is teaching the bot) ────────────
+    if (pendingHints.has(chatId)) {
+      const pending = pendingHints.get(chatId)!;
+
+      // "skip" cancels the hint flow
+      if (text.toLowerCase() === "skip") {
+        pendingHints.delete(chatId);
+        await bot.sendMessage(chatId, "👍 Skipped. Ask me another question anytime.");
+        return;
+      }
+
+      activeChatRequests.add(chatId);
+      const hint = text;
+
+      try {
+        await bot.sendMessage(chatId, "🔧 Applying your hint...");
+
+        console.log(`[telegram] Chat ${chatId} hint: "${hint}"`);
+        const rawSQL = await pending.llm.refineWithHint(
+          pending.schema,
+          pending.question,
+          pending.failedSQL,
+          hint,
+          {},
+        );
+
+        const sql = validateSQL(rawSQL);
+        console.log(`[telegram] hint-sql: ${sql}`);
+
+        const rows = await executeQuery(sql);
+        console.log(`[telegram] hint-rows: ${rows.length}`);
+
+        if (rows.length > 0) {
+          // Success! Save the learning
+          addLearning({
+            hint,
+            question: pending.question,
+            failedSQL: pending.failedSQL,
+            fixedSQL: sql,
+          });
+
+          // Summarize and send result
+          const cost = await estimateQueryCost(sql);
+          const summary = await pending.llm.summarizeResults(
+            pending.question,
+            sql,
+            rows,
+            pending.history,
+          );
+
+          const result: AgentResult = {
+            generated_sql: sql,
+            query_cost: cost,
+            row_count: rows.length,
+            answer_summary: summary,
+            raw_data_preview: rows.slice(0, 10),
+            retried: true,
+          };
+
+          await bot.sendMessage(chatId, "🧠 Got it! I've learned this correction and will remember it for next time.");
+          await sendResult(bot, chatId, result);
+
+          // Update conversation memory
+          const history = chatHistories.get(chatId) || [];
+          history.push({ role: "user", content: pending.question });
+          history.push({
+            role: "assistant",
+            content: `SQL: ${sql}\nAnswer: ${summary}`,
+          });
+          while (history.length > 20) history.splice(0, 2);
+
+          pendingHints.delete(chatId);
+        } else {
+          // Still 0 rows
+          pending.failedSQL = sql;
+          pending.attempts++;
+
+          if (pending.attempts >= 3) {
+            pendingHints.delete(chatId);
+            await bot.sendMessage(
+              chatId,
+              "😔 Still 0 results after 3 hints. Let's move on — try rephrasing your question.",
+            );
+          } else {
+            await bot.sendMessage(
+              chatId,
+              `🔍 Still 0 results (attempt ${pending.attempts}/3).\n\nFailed SQL:\n${sql}\n\nSend another hint or type "skip" to move on.`,
+            );
+          }
+        }
+      } catch (err: unknown) {
+        console.error(`[telegram] Chat ${chatId} hint error:`, err);
+        const errorMsg = formatError(err);
+        await bot.sendMessage(chatId, errorMsg);
+        pendingHints.delete(chatId);
+      } finally {
+        activeChatRequests.delete(chatId);
+      }
+      return;
+    }
+
+    // ── Normal question flow ──────────────────────────────────────
     if (activeChatRequests.has(chatId)) {
       await bot.sendMessage(chatId, "⏳ I'm still working on your previous question. Please wait...");
       return;
     }
     activeChatRequests.add(chatId);
 
-    // Get or create history for this chat
     if (!chatHistories.has(chatId)) {
       chatHistories.set(chatId, []);
     }
     const history = chatHistories.get(chatId)!;
 
-    // Send initial status message that we'll keep editing
+    // Send initial status message
     let statusMsgId: number;
     try {
       const statusMsg = await bot.sendMessage(chatId, "⏳ Processing your question...");
@@ -186,49 +336,17 @@ export function startTelegramBot(llm: LLMProvider, schema: string): void {
 
     const stepTrail: string[] = [];
 
-    // Progress callback: edits the status message live
     const onProgress = (step: string, detail?: string) => {
       const label = (detail && STEP_ICONS[detail]) || step;
       stepTrail.push(label);
       const newText = buildStatusText(stepTrail);
-
-      bot.editMessageText(newText, { chat_id: chatId, message_id: statusMsgId }).catch(() => {
-        // Ignore edit errors (rate limit, message not modified, etc.)
-      });
+      bot.editMessageText(newText, { chat_id: chatId, message_id: statusMsgId }).catch(() => {});
     };
 
     try {
       console.log(`[telegram] Chat ${chatId}: "${text}"`);
       const result = await runAgent(text, llm, schema, history, null, onProgress);
       console.log(`[telegram] Chat ${chatId}: got ${result.row_count} rows`);
-
-      // Update conversation memory
-      history.push({ role: "user", content: text });
-      history.push({
-        role: "assistant",
-        content: `SQL: ${result.generated_sql}\nAnswer: ${result.answer_summary}`,
-      });
-      while (history.length > 20) history.splice(0, 2);
-
-      // Delete the status message
-      try {
-        await bot.deleteMessage(chatId, statusMsgId);
-      } catch {
-        // Ignore — might already be deleted
-      }
-
-      // Send the final result as plain text (guaranteed to work)
-      const response = formatTelegramResult(result);
-      const chunks = splitMessage(response, 4096);
-      for (const chunk of chunks) {
-        try {
-          await bot.sendMessage(chatId, chunk);
-        } catch (sendErr) {
-          console.error("[telegram] Failed to send result chunk:", sendErr);
-        }
-      }
-    } catch (err: unknown) {
-      console.error(`[telegram] Chat ${chatId} error:`, err);
 
       // Delete the status message
       try {
@@ -237,7 +355,42 @@ export function startTelegramBot(llm: LLMProvider, schema: string): void {
         // Ignore
       }
 
-      // Send error as plain text
+      if (result.row_count === 0) {
+        // ── 0 rows: enter hint mode ─────────────────────────────
+        pendingHints.set(chatId, {
+          question: text,
+          failedSQL: result.generated_sql,
+          schema,
+          llm,
+          history: [...history],
+          attempts: 1,
+        });
+
+        await bot.sendMessage(
+          chatId,
+          "🔍 Got 0 results. I might be using wrong columns or values.\n\n" +
+            `Failed SQL:\n${result.generated_sql}\n\n` +
+            "💡 Send me a hint to fix this (e.g., \"use zone_name instead of region\", \"status is stored as is_active boolean\").\n" +
+            "Or type \"skip\" to move on.",
+        );
+      } else {
+        // ── Got results: send normally ──────────────────────────
+        history.push({ role: "user", content: text });
+        history.push({
+          role: "assistant",
+          content: `SQL: ${result.generated_sql}\nAnswer: ${result.answer_summary}`,
+        });
+        while (history.length > 20) history.splice(0, 2);
+
+        await sendResult(bot, chatId, result);
+      }
+    } catch (err: unknown) {
+      console.error(`[telegram] Chat ${chatId} error:`, err);
+      try {
+        await bot.deleteMessage(chatId, statusMsgId);
+      } catch {
+        // Ignore
+      }
       const errorMsg = formatError(err);
       try {
         await bot.sendMessage(chatId, errorMsg);
@@ -249,7 +402,7 @@ export function startTelegramBot(llm: LLMProvider, schema: string): void {
     }
   });
 
-  // Handle polling errors gracefully
+  // Handle polling errors
   bot.on("polling_error", (err) => {
     console.error(`[telegram] Polling error: ${err.message}`);
   });
