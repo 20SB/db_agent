@@ -10,6 +10,7 @@ export interface AgentResult {
   row_count: number;
   answer_summary: string;
   raw_data_preview: Record<string, unknown>[];
+  retried: boolean;
 }
 
 export interface ConversationTurn {
@@ -22,6 +23,24 @@ export interface LLMProvider {
     schema: string,
     question: string,
     history: ConversationTurn[]
+  ): Promise<string>;
+  generateExplorationQueries(
+    schema: string,
+    question: string,
+    failedSQL: string
+  ): Promise<string>;
+  refineSQL(
+    schema: string,
+    question: string,
+    failedSQL: string,
+    discoveredData: Record<string, unknown[]>
+  ): Promise<string>;
+  refineWithHint(
+    schema: string,
+    question: string,
+    failedSQL: string,
+    userHint: string,
+    discoveredData: Record<string, unknown[]>
   ): Promise<string>;
   summarizeResults(
     question: string,

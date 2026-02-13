@@ -1,6 +1,12 @@
 import { GoogleGenerativeAI, Content } from "@google/generative-ai";
 import { LLMProvider, ConversationTurn } from "../types";
-import { buildSystemPrompt, buildSummaryPrompt } from "./llm.interface";
+import {
+  buildSystemPrompt,
+  buildExplorationPrompt,
+  buildRefinePrompt,
+  buildHintRefinePrompt,
+  buildSummaryPrompt,
+} from "./llm.interface";
 
 const MODEL = "gemini-2.0-flash";
 
@@ -20,6 +26,15 @@ export class GeminiProvider implements LLMProvider {
     }));
   }
 
+  private async ask(system: string, userMsg: string): Promise<string> {
+    const model = this.client.getGenerativeModel({
+      model: MODEL,
+      systemInstruction: system,
+    });
+    const result = await model.generateContent(userMsg);
+    return result.response.text().trim();
+  }
+
   async generateSQL(
     schema: string,
     question: string,
@@ -32,6 +47,42 @@ export class GeminiProvider implements LLMProvider {
     const chat = model.startChat({ history: this.toGeminiHistory(history) });
     const result = await chat.sendMessage(question);
     return result.response.text().trim();
+  }
+
+  async generateExplorationQueries(
+    schema: string,
+    question: string,
+    failedSQL: string
+  ): Promise<string> {
+    return this.ask(
+      "You are a PostgreSQL expert helping debug a query that returned 0 rows.",
+      buildExplorationPrompt(schema, question, failedSQL)
+    );
+  }
+
+  async refineSQL(
+    schema: string,
+    question: string,
+    failedSQL: string,
+    discoveredData: Record<string, unknown[]>
+  ): Promise<string> {
+    return this.ask(
+      "You are a PostgreSQL expert rewriting a failed query with real DB values.",
+      buildRefinePrompt(schema, question, failedSQL, discoveredData)
+    );
+  }
+
+  async refineWithHint(
+    schema: string,
+    question: string,
+    failedSQL: string,
+    userHint: string,
+    discoveredData: Record<string, unknown[]>
+  ): Promise<string> {
+    return this.ask(
+      "You are a PostgreSQL expert. Use the user's hint to fix a failed query.",
+      buildHintRefinePrompt(schema, question, failedSQL, userHint, discoveredData)
+    );
   }
 
   async summarizeResults(

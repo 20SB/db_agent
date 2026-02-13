@@ -2,6 +2,7 @@ import * as dotenv from "dotenv";
 import * as fs from "fs";
 import * as path from "path";
 import * as readline from "readline";
+import chalk from "chalk";
 
 dotenv.config({ path: path.resolve(__dirname, "../.env") });
 
@@ -12,6 +13,7 @@ import { validateSQL } from "./sqlValidator";
 import { executeQuery, closePool } from "./db";
 import { estimateQueryCost } from "./costEstimator";
 import { formatResult } from "./formatter";
+import { smartRetry } from "./smartRetry";
 
 // ── Provider factory ────────────────────────────────────────────────
 function createProvider(): LLMProvider {
@@ -40,12 +42,80 @@ function loadSchema(): string {
   return fs.readFileSync(resolved, "utf-8");
 }
 
+// ── Prompt helper ───────────────────────────────────────────────────
+function promptUser(
+  rl: readline.Interface,
+  message: string
+): Promise<string> {
+  return new Promise((resolve) =>
+    rl.question(message, (ans) => resolve(ans.trim()))
+  );
+}
+
+// ── Human-in-the-loop: ask user for help, retry up to N times ───────
+async function userAssistedRetry(
+  llm: LLMProvider,
+  schema: string,
+  question: string,
+  failedSQL: string,
+  discoveredData: Record<string, unknown[]>,
+  rl: readline.Interface
+): Promise<{ sql: string; rows: Record<string, unknown>[] } | null> {
+  const MAX_HINTS = 3;
+
+  for (let attempt = 1; attempt <= MAX_HINTS; attempt++) {
+    console.log(
+      chalk.yellowBright(
+        `\n[help-needed] Still 0 rows. Can you give me a hint? (attempt ${attempt}/${MAX_HINTS})`
+      )
+    );
+    console.log(
+      chalk.gray(
+        '  Examples: "region is stored as zone_name", "use city column with Delhi, Jaipur", "try ILIKE"'
+      )
+    );
+
+    const hint = await promptUser(rl, chalk.yellowBright("Your hint (or 'skip'): "));
+
+    if (!hint || hint.toLowerCase() === "skip") {
+      console.log(chalk.gray("[help] Skipped by user."));
+      return null;
+    }
+
+    console.log(chalk.yellow("[help] Processing your hint with AI…"));
+    const rawSQL = await llm.refineWithHint(
+      schema,
+      question,
+      failedSQL,
+      hint,
+      discoveredData
+    );
+
+    const sql = validateSQL(rawSQL);
+    console.log(chalk.green(`[hint-sql] ${sql}`));
+
+    const rows = await executeQuery(sql);
+    console.log(chalk.green(`[rows]     ${rows.length} row(s) returned`));
+
+    if (rows.length > 0) {
+      return { sql, rows };
+    }
+
+    failedSQL = sql; // carry forward the latest attempt
+    console.log(chalk.gray("[help] Still 0 rows. Let's try again…"));
+  }
+
+  console.log(chalk.gray("[help] Max hints reached. Proceeding with 0 rows."));
+  return null;
+}
+
 // ── Core agent pipeline ─────────────────────────────────────────────
 async function runAgent(
   question: string,
   llm: LLMProvider,
   schema: string,
-  history: ConversationTurn[]
+  history: ConversationTurn[],
+  rl: readline.Interface | null
 ): Promise<AgentResult> {
   // Step 1 — Generate SQL
   console.log("\n[1/5] Generating SQL…");
@@ -53,7 +123,7 @@ async function runAgent(
 
   // Step 2 — Validate
   console.log("[2/5] Validating SQL…");
-  const sql = validateSQL(rawSQL);
+  let sql = validateSQL(rawSQL);
   console.log(`[sql]  ${sql}`);
 
   // Step 3 — Cost estimate
@@ -63,8 +133,41 @@ async function runAgent(
 
   // Step 4 — Execute
   console.log("[4/5] Executing query…");
-  const rows = await executeQuery(sql);
+  let rows = await executeQuery(sql);
   console.log(`[rows] ${rows.length} row(s) returned`);
+
+  // Step 4b — Smart retry if 0 rows
+  let retried = false;
+  let discoveredData: Record<string, unknown[]> = {};
+
+  if (rows.length === 0) {
+    const retryResult = await smartRetry(llm, schema, question, sql);
+    if (retryResult) {
+      discoveredData = retryResult.discoveredData;
+      if (retryResult.rows.length > 0) {
+        sql = retryResult.sql;
+        rows = retryResult.rows;
+        retried = true;
+      }
+    }
+
+    // Step 4c — Human-in-the-loop if still 0 rows
+    if (rows.length === 0 && rl) {
+      const hintResult = await userAssistedRetry(
+        llm,
+        schema,
+        question,
+        sql,
+        discoveredData,
+        rl
+      );
+      if (hintResult && hintResult.rows.length > 0) {
+        sql = hintResult.sql;
+        rows = hintResult.rows;
+        retried = true;
+      }
+    }
+  }
 
   // Step 5 — Summarize
   console.log("[5/5] Summarizing results…");
@@ -72,10 +175,11 @@ async function runAgent(
 
   return {
     generated_sql: sql,
-    query_cost: cost,
+    query_cost: retried ? await estimateQueryCost(sql) : cost,
     row_count: rows.length,
     answer_summary: summary,
     raw_data_preview: rows.slice(0, 10),
+    retried,
   };
 }
 
@@ -100,7 +204,7 @@ async function startREPL(llm: LLMProvider, schema: string): Promise<void> {
       }
 
       try {
-        const result = await runAgent(question, llm, schema, history);
+        const result = await runAgent(question, llm, schema, history, rl);
 
         // Update conversation memory
         history.push({ role: "user", content: question });
@@ -133,14 +237,20 @@ async function main(): Promise<void> {
 
   // Single-shot mode: pass question as CLI arg
   if (question) {
+    // Create a temporary rl for hint prompts even in single-shot mode
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
     try {
-      const result = await runAgent(question, llm, schema, []);
+      const result = await runAgent(question, llm, schema, [], rl);
       console.log(formatResult(result));
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[error] ${message}`);
       process.exit(1);
     } finally {
+      rl.close();
       await closePool();
     }
     return;

@@ -43,7 +43,8 @@ export function formatResult(result: AgentResult): string {
   const sections = [
     "",
     DLINE,
-    chalk.bold.green("  DB AGENT — RESULT"),
+    chalk.bold.green("  DB AGENT — RESULT") +
+      (result.retried ? chalk.magentaBright("  (smart-retried)") : ""),
     DLINE,
     "",
     chalk.bold.white("  Answer"),
