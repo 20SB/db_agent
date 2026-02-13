@@ -1,3 +1,4 @@
+import * as http from "http";
 import TelegramBot from "node-telegram-bot-api";
 import { LLMProvider, ConversationTurn, AgentResult } from "./types";
 import { runAgent } from "./agent";
@@ -153,6 +154,17 @@ export function startTelegramBot(llm: LLMProvider, schema: string): void {
     console.error("[error] TELEGRAM_BOT_TOKEN not set in .env — cannot start bot.");
     process.exit(1);
   }
+
+  // ── Health check server for Cloud Run ───────────────────────────
+  const port = parseInt(process.env.PORT || "8080", 10);
+  http
+    .createServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok", service: "db-agent-telegram" }));
+    })
+    .listen(port, () => {
+      console.log(`[health] Listening on port ${port}`);
+    });
 
   const bot = new TelegramBot(token, { polling: true });
 
