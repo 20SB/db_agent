@@ -14,9 +14,10 @@ import { executeQuery, closePool } from "./db";
 import { estimateQueryCost } from "./costEstimator";
 import { formatResult } from "./formatter";
 import { smartRetry } from "./smartRetry";
+import { startTelegramBot } from "./telegram";
 
 // ── Provider factory ────────────────────────────────────────────────
-function createProvider(): LLMProvider {
+export function createProvider(): LLMProvider {
   const provider = (process.env.LLM_PROVIDER || "gemini").toLowerCase();
   switch (provider) {
     case "anthropic":
@@ -29,7 +30,7 @@ function createProvider(): LLMProvider {
 }
 
 // ── Schema loader ───────────────────────────────────────────────────
-function loadSchema(): string {
+export function loadSchema(): string {
   const schemaPath = process.env.SCHEMA_PATH;
   if (!schemaPath) {
     console.warn("[warn] SCHEMA_PATH not set — using empty schema context.");
@@ -110,7 +111,7 @@ async function userAssistedRetry(
 }
 
 // ── Core agent pipeline ─────────────────────────────────────────────
-async function runAgent(
+export async function runAgent(
   question: string,
   llm: LLMProvider,
   schema: string,
@@ -231,9 +232,18 @@ async function startREPL(llm: LLMProvider, schema: string): Promise<void> {
 
 // ── CLI entrypoint ──────────────────────────────────────────────────
 async function main(): Promise<void> {
+  const args = process.argv.slice(2);
+  const telegramFlag = args.includes("--telegram");
+  const question = args.filter((a) => a !== "--telegram").join(" ").trim();
+
   const llm = createProvider();
   const schema = loadSchema();
-  const question = process.argv.slice(2).join(" ").trim();
+
+  // Telegram bot mode
+  if (telegramFlag) {
+    startTelegramBot(llm, schema);
+    return;
+  }
 
   // Single-shot mode: pass question as CLI arg
   if (question) {
