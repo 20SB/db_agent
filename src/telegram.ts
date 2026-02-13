@@ -163,19 +163,103 @@ export function startTelegramBot(llm: LLMProvider, schema: string): void {
 
   console.log("[telegram] Bot is running. Waiting for messages...");
 
+  // ── Register bot commands in Telegram's menu ────────────────────
+  bot.setMyCommands([
+    { command: "start", description: "Welcome message & getting started" },
+    { command: "help", description: "Show all commands & how to use the bot" },
+    { command: "clear", description: "Clear conversation history" },
+    { command: "learnings", description: "View all saved learnings" },
+    { command: "forget", description: "Remove a learning (e.g. /forget 2)" },
+  ]).catch(() => {});
+
   // ── /start command ──────────────────────────────────────────────
   bot.onText(/\/start/, (msg) => {
     bot.sendMessage(
       msg.chat.id,
-      "🤖 DB Agent Bot\n\n" +
-        "Ask me anything about your database in plain English.\n" +
-        "I'll generate SQL, run it, and give you a summary.\n\n" +
-        "When I get 0 results, you can teach me with a hint — I'll remember it!\n\n" +
-        "Commands:\n" +
-        "/start — Show this message\n" +
-        "/clear — Clear conversation history\n" +
-        "/learnings — View saved learnings\n" +
-        "/forget <number> — Remove a learning by number",
+      "🤖 DB Agent Bot\n" +
+        "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n" +
+        "I'm your database assistant. Ask me anything about your database in plain English — " +
+        "I'll generate SQL, run it safely, and give you a human-readable answer.\n\n" +
+        "🔒 Safety: I only run read-only SELECT queries. No data is ever modified.\n\n" +
+        "━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
+        "🚀 Quick Start\n" +
+        "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n" +
+        "Just type a question like:\n" +
+        '  • "How many active shops are there?"\n' +
+        '  • "Show me the top 10 products by sales"\n' +
+        '  • "List all users created this month"\n\n' +
+        "I understand follow-ups too:\n" +
+        '  • "Group that by city"\n' +
+        '  • "Show only the top 5"\n\n' +
+        "Type /help for all commands and features.",
+    );
+  });
+
+  // ── /help command ───────────────────────────────────────────────
+  bot.onText(/\/help/, (msg) => {
+    bot.sendMessage(
+      msg.chat.id,
+      "📖 Help — DB Agent Bot\n" +
+        "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n" +
+
+        "💬 ASKING QUESTIONS\n" +
+        "━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
+        "Just type any question in plain English.\n" +
+        "I'll generate SQL, validate it, run it, and summarize the results.\n\n" +
+        "Examples:\n" +
+        '  • "How many shops are there?"\n' +
+        '  • "Show revenue by month for 2024"\n' +
+        '  • "Which products have zero stock?"\n' +
+        '  • "Count users grouped by status"\n\n' +
+        "Follow-up questions work too — I remember context:\n" +
+        '  • "Now group that by region"\n' +
+        '  • "Only show the top 5"\n' +
+        '  • "Filter that for active users only"\n\n' +
+
+        "🧠 LEARNING FROM YOU\n" +
+        "━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
+        "When a query returns 0 results, I'll show you the\n" +
+        "failed SQL and ask for a hint. You can teach me:\n\n" +
+        '  • "use zone_name column instead of region"\n' +
+        '  • "status values are active/inactive, not 1/0"\n' +
+        '  • "join with stores table, not shops"\n\n' +
+        "I'll retry with your hint. If it works, I save the\n" +
+        "correction and apply it to all future queries.\n" +
+        'Type "skip" to cancel the hint flow.\n\n' +
+
+        "📊 WHAT YOU GET\n" +
+        "━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
+        "Each response includes:\n" +
+        "  • 💬 Human-readable answer\n" +
+        "  • 🔧 The exact SQL that was executed\n" +
+        "  • 📊 Row count, cost estimate, query plan\n" +
+        "  • 📋 Data preview table (up to 5 rows)\n\n" +
+
+        "⚡ PIPELINE STEPS\n" +
+        "━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
+        "While processing, you'll see live progress:\n" +
+        "  🧠 Generating SQL\n" +
+        "  🔍 Validating (read-only check)\n" +
+        "  📊 Estimating query cost\n" +
+        "  ⚡ Executing on database\n" +
+        "  🔄 Smart retry (if 0 rows)\n" +
+        "  ✍️ Summarizing results\n\n" +
+
+        "🛠 COMMANDS\n" +
+        "━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
+        "/start — Welcome message & getting started\n" +
+        "/help — This help page\n" +
+        "/clear — Clear conversation history & pending hints\n" +
+        "/learnings — View all saved learnings\n" +
+        "/forget <n> — Remove a learning by its number\n" +
+        '                  e.g. /forget 2\n\n' +
+
+        "💡 TIPS\n" +
+        "━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
+        "  • Be specific — \"sales last 7 days\" beats \"recent sales\"\n" +
+        "  • Use follow-ups — I keep last 10 Q&A pairs as context\n" +
+        "  • Teach me once — learnings apply to ALL future queries\n" +
+        "  • One question at a time — wait for the answer before asking the next",
     );
   });
 
@@ -183,7 +267,7 @@ export function startTelegramBot(llm: LLMProvider, schema: string): void {
   bot.onText(/\/clear/, (msg) => {
     chatHistories.delete(msg.chat.id);
     pendingHints.delete(msg.chat.id);
-    bot.sendMessage(msg.chat.id, "🗑 Conversation history cleared.");
+    bot.sendMessage(msg.chat.id, "🗑 Conversation history and pending hints cleared.");
   });
 
   // ── /learnings command ──────────────────────────────────────────
