@@ -6,7 +6,7 @@ import chalk from "chalk";
 
 dotenv.config({ path: path.resolve(__dirname, "../.env") });
 
-import { LLMProvider, AgentResult, ConversationTurn } from "./types";
+import { LLMProvider, AgentResult, ConversationTurn, ProgressCallback } from "./types";
 import { GeminiProvider } from "./providers/gemini.provider";
 import { AnthropicProvider } from "./providers/anthropic.provider";
 import { validateSQL } from "./sqlValidator";
@@ -14,7 +14,6 @@ import { executeQuery, closePool } from "./db";
 import { estimateQueryCost } from "./costEstimator";
 import { formatResult } from "./formatter";
 import { smartRetry } from "./smartRetry";
-import { startTelegramBot } from "./telegram";
 
 // ── Provider factory ────────────────────────────────────────────────
 export function createProvider(): LLMProvider {
@@ -44,13 +43,8 @@ export function loadSchema(): string {
 }
 
 // ── Prompt helper ───────────────────────────────────────────────────
-function promptUser(
-  rl: readline.Interface,
-  message: string
-): Promise<string> {
-  return new Promise((resolve) =>
-    rl.question(message, (ans) => resolve(ans.trim()))
-  );
+function promptUser(rl: readline.Interface, message: string): Promise<string> {
+  return new Promise((resolve) => rl.question(message, (ans) => resolve(ans.trim())));
 }
 
 // ── Human-in-the-loop: ask user for help, retry up to N times ───────
@@ -60,20 +54,20 @@ async function userAssistedRetry(
   question: string,
   failedSQL: string,
   discoveredData: Record<string, unknown[]>,
-  rl: readline.Interface
+  rl: readline.Interface,
 ): Promise<{ sql: string; rows: Record<string, unknown>[] } | null> {
   const MAX_HINTS = 3;
 
   for (let attempt = 1; attempt <= MAX_HINTS; attempt++) {
     console.log(
       chalk.yellowBright(
-        `\n[help-needed] Still 0 rows. Can you give me a hint? (attempt ${attempt}/${MAX_HINTS})`
-      )
+        `\n[help-needed] Still 0 rows. Can you give me a hint? (attempt ${attempt}/${MAX_HINTS})`,
+      ),
     );
     console.log(
       chalk.gray(
-        '  Examples: "region is stored as zone_name", "use city column with Delhi, Jaipur", "try ILIKE"'
-      )
+        '  Examples: "region is stored as zone_name", "use city column with Delhi, Jaipur", "try ILIKE"',
+      ),
     );
 
     const hint = await promptUser(rl, chalk.yellowBright("Your hint (or 'skip'): "));
@@ -84,13 +78,7 @@ async function userAssistedRetry(
     }
 
     console.log(chalk.yellow("[help] Processing your hint with AI…"));
-    const rawSQL = await llm.refineWithHint(
-      schema,
-      question,
-      failedSQL,
-      hint,
-      discoveredData
-    );
+    const rawSQL = await llm.refineWithHint(schema, question, failedSQL, hint, discoveredData);
 
     const sql = validateSQL(rawSQL);
     console.log(chalk.green(`[hint-sql] ${sql}`));
@@ -116,24 +104,31 @@ export async function runAgent(
   llm: LLMProvider,
   schema: string,
   history: ConversationTurn[],
-  rl: readline.Interface | null
+  rl: readline.Interface | null,
+  onProgress?: ProgressCallback,
 ): Promise<AgentResult> {
+  const emit = (step: string, detail?: string) => {
+    console.log(step);
+    if (onProgress) onProgress(step, detail);
+  };
+
   // Step 1 — Generate SQL
-  console.log("\n[1/5] Generating SQL…");
+  emit("[1/5] Generating SQL…", "thinking");
   const rawSQL = await llm.generateSQL(schema, question, history);
+  console.log("rawSQL", rawSQL);
 
   // Step 2 — Validate
-  console.log("[2/5] Validating SQL…");
+  emit("[2/5] Validating SQL…", "validating");
   let sql = validateSQL(rawSQL);
   console.log(`[sql]  ${sql}`);
 
   // Step 3 — Cost estimate
-  console.log("[3/5] Estimating query cost…");
+  emit("[3/5] Estimating query cost…", "estimating");
   const cost = await estimateQueryCost(sql);
   console.log(`[cost] ${cost.plan_summary}`);
 
   // Step 4 — Execute
-  console.log("[4/5] Executing query…");
+  emit("[4/5] Executing query…", "executing");
   let rows = await executeQuery(sql);
   console.log(`[rows] ${rows.length} row(s) returned`);
 
@@ -142,6 +137,7 @@ export async function runAgent(
   let discoveredData: Record<string, unknown[]> = {};
 
   if (rows.length === 0) {
+    emit("[4/5] No results — smart retrying…", "retrying");
     const retryResult = await smartRetry(llm, schema, question, sql);
     if (retryResult) {
       discoveredData = retryResult.discoveredData;
@@ -154,14 +150,7 @@ export async function runAgent(
 
     // Step 4c — Human-in-the-loop if still 0 rows
     if (rows.length === 0 && rl) {
-      const hintResult = await userAssistedRetry(
-        llm,
-        schema,
-        question,
-        sql,
-        discoveredData,
-        rl
-      );
+      const hintResult = await userAssistedRetry(llm, schema, question, sql, discoveredData, rl);
       if (hintResult && hintResult.rows.length > 0) {
         sql = hintResult.sql;
         rows = hintResult.rows;
@@ -171,8 +160,10 @@ export async function runAgent(
   }
 
   // Step 5 — Summarize
-  console.log("[5/5] Summarizing results…");
+  emit("[5/5] Summarizing results…", "summarizing");
   const summary = await llm.summarizeResults(question, sql, rows, history);
+
+  if (onProgress) onProgress("Done!", "done");
 
   return {
     generated_sql: sql,
@@ -234,13 +225,17 @@ async function startREPL(llm: LLMProvider, schema: string): Promise<void> {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const telegramFlag = args.includes("--telegram");
-  const question = args.filter((a) => a !== "--telegram").join(" ").trim();
+  const question = args
+    .filter((a) => a !== "--telegram")
+    .join(" ")
+    .trim();
 
   const llm = createProvider();
   const schema = loadSchema();
 
-  // Telegram bot mode
+  // Telegram bot mode (dynamic require to avoid circular dependency)
   if (telegramFlag) {
+    const { startTelegramBot } = require("./telegram");
     startTelegramBot(llm, schema);
     return;
   }

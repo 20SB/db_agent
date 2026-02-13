@@ -11,6 +11,17 @@ export function validateSQL(raw: string): string {
   // Strip markdown code fences if the LLM wraps the output
   let sql = raw.replace(/```sql\s*/gi, "").replace(/```/g, "").trim();
 
+  // Strip common LLM prefixes like "SQL:", "Query:", "Here is the query:", etc.
+  sql = sql.replace(/^(?:SQL|Query|Here(?:'s| is)(?: the)?(?: SQL)?(?: query)?)\s*:\s*/i, "").trim();
+
+  // If the LLM added explanation text before the SELECT, extract from the first SELECT
+  if (!sql.toUpperCase().startsWith("SELECT")) {
+    const selectIndex = sql.toUpperCase().indexOf("SELECT");
+    if (selectIndex > 0) {
+      sql = sql.slice(selectIndex);
+    }
+  }
+
   // Remove trailing semicolons for safety
   sql = sql.replace(/;\s*$/, "").trim();
 

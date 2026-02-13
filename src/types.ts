@@ -18,6 +18,8 @@ export interface ConversationTurn {
   content: string;
 }
 
+export type ProgressCallback = (step: string, detail?: string) => void;
+
 export interface LLMProvider {
   generateSQL(
     schema: string,
