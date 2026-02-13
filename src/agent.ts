@@ -15,6 +15,7 @@ import { estimateQueryCost } from "./costEstimator";
 import { formatResult } from "./formatter";
 import { smartRetry } from "./smartRetry";
 import { getLearningsForPrompt } from "./learnings";
+import { syncSchemaFromDB } from "./schemaSync";
 
 // ── Provider factory ────────────────────────────────────────────────
 export function createProvider(): LLMProvider {
@@ -230,13 +231,22 @@ async function startREPL(llm: LLMProvider, schema: string): Promise<void> {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const telegramFlag = args.includes("--telegram");
+  const syncFlag = args.includes("--sync");
   const question = args
-    .filter((a) => a !== "--telegram")
+    .filter((a) => a !== "--telegram" && a !== "--sync")
     .join(" ")
     .trim();
 
   const llm = createProvider();
-  const schema = loadSchema();
+
+  // Load schema: --sync pulls from live DB, otherwise from SCHEMA_PATH file
+  let schema: string;
+  if (syncFlag) {
+    console.log("[schema] Syncing from live database...");
+    schema = await syncSchemaFromDB();
+  } else {
+    schema = loadSchema();
+  }
 
   // Telegram bot mode (dynamic require to avoid circular dependency)
   if (telegramFlag) {

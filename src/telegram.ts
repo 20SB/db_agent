@@ -6,6 +6,7 @@ import { validateSQL } from "./sqlValidator";
 import { executeQuery } from "./db";
 import { estimateQueryCost } from "./costEstimator";
 import { addLearning, getLearningsSummary, removeLearning } from "./learnings";
+import { syncSchemaFromDB } from "./schemaSync";
 
 // ── Status icons for each pipeline phase ────────────────────────────
 const STEP_ICONS: Record<string, string> = {
@@ -148,7 +149,8 @@ async function sendResult(bot: TelegramBot, chatId: number, result: AgentResult)
 }
 
 // ── Telegram bot ────────────────────────────────────────────────────
-export function startTelegramBot(llm: LLMProvider, schema: string): void {
+export function startTelegramBot(llm: LLMProvider, initialSchema: string): void {
+  let schema = initialSchema;
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) {
     console.error("[error] TELEGRAM_BOT_TOKEN not set in .env — cannot start bot.");
@@ -179,6 +181,7 @@ export function startTelegramBot(llm: LLMProvider, schema: string): void {
   bot.setMyCommands([
     { command: "start", description: "Welcome message & getting started" },
     { command: "help", description: "Show all commands & how to use the bot" },
+    { command: "sync", description: "Sync schema from live database" },
     { command: "clear", description: "Clear conversation history" },
     { command: "learnings", description: "View all saved learnings" },
     { command: "forget", description: "Remove a learning (e.g. /forget 2)" },
@@ -261,6 +264,7 @@ export function startTelegramBot(llm: LLMProvider, schema: string): void {
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
         "/start — Welcome message & getting started\n" +
         "/help — This help page\n" +
+        "/sync — Refresh schema from live database\n" +
         "/clear — Clear conversation history & pending hints\n" +
         "/learnings — View all saved learnings\n" +
         "/forget <n> — Remove a learning by its number\n" +
@@ -273,6 +277,30 @@ export function startTelegramBot(llm: LLMProvider, schema: string): void {
         "  • Teach me once — learnings apply to ALL future queries\n" +
         "  • One question at a time — wait for the answer before asking the next",
     );
+  });
+
+  // ── /sync command ───────────────────────────────────────────────
+  bot.onText(/\/sync/, async (msg) => {
+    const chatId = msg.chat.id;
+    try {
+      await bot.sendMessage(chatId, "🔄 Syncing schema from live database...");
+      const newSchema = await syncSchemaFromDB();
+      schema = newSchema;
+
+      // Count tables from the DDL
+      const tableCount = (newSchema.match(/CREATE TABLE /g) || []).length;
+      await bot.sendMessage(
+        chatId,
+        `✅ Schema synced!\n\n` +
+          `📊 ${tableCount} table(s) loaded from ${process.env.DB_NAME || "database"}\n` +
+          `🕐 ${new Date().toLocaleTimeString()}\n\n` +
+          "All future queries will use the updated schema.",
+      );
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("[telegram] Schema sync error:", err);
+      await bot.sendMessage(chatId, `❌ Schema sync failed\n${message}`);
+    }
   });
 
   // ── /clear command ──────────────────────────────────────────────
