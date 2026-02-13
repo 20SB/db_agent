@@ -1,4 +1,141 @@
+import * as fs from "fs";
+import * as path from "path";
 import { getPool } from "./db";
+
+// ── Schema file persistence path ─────────────────────────────────────
+const SAVED_SCHEMA_PATH = path.resolve(__dirname, "../schema_synced.sql");
+
+// ── Parse table names and their columns from DDL text ────────────────
+export interface TableInfo {
+  name: string;
+  columns: string[]; // column lines as-is from DDL
+}
+
+export function extractTables(ddl: string): Map<string, TableInfo> {
+  const tables = new Map<string, TableInfo>();
+  const tableRegex = /CREATE TABLE (\S+) \(\n([\s\S]*?)\);/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = tableRegex.exec(ddl)) !== null) {
+    const name = match[1];
+    const colBlock = match[2];
+    const columns = colBlock
+      .split(",\n")
+      .map((c) => c.trim())
+      .filter(Boolean);
+    tables.set(name, { name, columns });
+  }
+  return tables;
+}
+
+// ── Diff two schemas ─────────────────────────────────────────────────
+export interface SchemaDiff {
+  oldTableCount: number;
+  newTableCount: number;
+  addedTables: string[];
+  removedTables: string[];
+  unchangedTables: string[];
+  modifiedTables: { name: string; addedCols: string[]; removedCols: string[] }[];
+}
+
+export function diffSchemas(oldDDL: string, newDDL: string): SchemaDiff {
+  const oldTables = extractTables(oldDDL);
+  const newTables = extractTables(newDDL);
+
+  const addedTables: string[] = [];
+  const removedTables: string[] = [];
+  const unchangedTables: string[] = [];
+  const modifiedTables: { name: string; addedCols: string[]; removedCols: string[] }[] = [];
+
+  // Find added and modified tables
+  for (const [name, newInfo] of newTables) {
+    if (!oldTables.has(name)) {
+      addedTables.push(name);
+    } else {
+      const oldInfo = oldTables.get(name)!;
+      const oldColNames = new Set(oldInfo.columns.map((c) => c.split(/\s+/)[0]));
+      const newColNames = new Set(newInfo.columns.map((c) => c.split(/\s+/)[0]));
+
+      const addedCols = newInfo.columns.filter((c) => !oldColNames.has(c.split(/\s+/)[0]));
+      const removedCols = oldInfo.columns.filter((c) => !newColNames.has(c.split(/\s+/)[0]));
+
+      if (addedCols.length > 0 || removedCols.length > 0) {
+        modifiedTables.push({ name, addedCols, removedCols });
+      } else {
+        unchangedTables.push(name);
+      }
+    }
+  }
+
+  // Find removed tables
+  for (const name of oldTables.keys()) {
+    if (!newTables.has(name)) {
+      removedTables.push(name);
+    }
+  }
+
+  return {
+    oldTableCount: oldTables.size,
+    newTableCount: newTables.size,
+    addedTables,
+    removedTables,
+    unchangedTables,
+    modifiedTables,
+  };
+}
+
+// ── Format diff for display ──────────────────────────────────────────
+export function formatDiff(diff: SchemaDiff): string {
+  const lines: string[] = [];
+
+  lines.push(`📊 Tables: ${diff.oldTableCount} → ${diff.newTableCount}`);
+
+  if (diff.addedTables.length > 0) {
+    lines.push(`\n➕ New tables (${diff.addedTables.length}):`);
+    for (const t of diff.addedTables) lines.push(`  • ${t}`);
+  }
+
+  if (diff.removedTables.length > 0) {
+    lines.push(`\n➖ Removed tables (${diff.removedTables.length}):`);
+    for (const t of diff.removedTables) lines.push(`  • ${t}`);
+  }
+
+  if (diff.modifiedTables.length > 0) {
+    lines.push(`\n✏️ Modified tables (${diff.modifiedTables.length}):`);
+    for (const mod of diff.modifiedTables) {
+      lines.push(`  • ${mod.name}`);
+      for (const c of mod.addedCols) lines.push(`    + ${c}`);
+      for (const c of mod.removedCols) lines.push(`    - ${c}`);
+    }
+  }
+
+  if (diff.unchangedTables.length > 0) {
+    lines.push(`\n✅ Unchanged: ${diff.unchangedTables.length} table(s)`);
+  }
+
+  if (
+    diff.addedTables.length === 0 &&
+    diff.removedTables.length === 0 &&
+    diff.modifiedTables.length === 0
+  ) {
+    lines.push("\nNo changes detected — schema is up to date.");
+  }
+
+  return lines.join("\n");
+}
+
+// ── Save / Load synced schema to file ────────────────────────────────
+export function saveSchema(ddl: string): void {
+  fs.writeFileSync(SAVED_SCHEMA_PATH, ddl, "utf-8");
+  console.log(`[schema-sync] Saved schema to ${SAVED_SCHEMA_PATH}`);
+}
+
+export function loadSavedSchema(): string | null {
+  if (fs.existsSync(SAVED_SCHEMA_PATH)) {
+    return fs.readFileSync(SAVED_SCHEMA_PATH, "utf-8");
+  }
+  return null;
+}
 
 // ── Pull live schema from PostgreSQL as CREATE TABLE DDL ────────────
 export async function syncSchemaFromDB(): Promise<string> {

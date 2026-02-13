@@ -6,7 +6,7 @@ import { validateSQL } from "./sqlValidator";
 import { executeQuery } from "./db";
 import { estimateQueryCost } from "./costEstimator";
 import { addLearning, getLearningsSummary, removeLearning } from "./learnings";
-import { syncSchemaFromDB } from "./schemaSync";
+import { syncSchemaFromDB, diffSchemas, formatDiff, saveSchema } from "./schemaSync";
 
 // ── Status icons for each pipeline phase ────────────────────────────
 const STEP_ICONS: Record<string, string> = {
@@ -284,16 +284,24 @@ export function startTelegramBot(llm: LLMProvider, initialSchema: string): void 
     const chatId = msg.chat.id;
     try {
       await bot.sendMessage(chatId, "🔄 Syncing schema from live database...");
-      const newSchema = await syncSchemaFromDB();
-      schema = newSchema;
 
-      // Count tables from the DDL
-      const tableCount = (newSchema.match(/CREATE TABLE /g) || []).length;
+      const oldSchema = schema;
+      const newSchema = await syncSchemaFromDB();
+
+      // Diff before updating
+      const diff = diffSchemas(oldSchema, newSchema);
+      const diffText = formatDiff(diff);
+
+      // Update in-memory schema and save to file
+      schema = newSchema;
+      saveSchema(newSchema);
+
       await bot.sendMessage(
         chatId,
-        `✅ Schema synced!\n\n` +
-          `📊 ${tableCount} table(s) loaded from ${process.env.DB_NAME || "database"}\n` +
+        `✅ Schema synced from ${process.env.DB_NAME || "database"}\n` +
           `🕐 ${new Date().toLocaleTimeString()}\n\n` +
+          diffText +
+          "\n\n💾 Schema saved to disk — persists across restarts.\n" +
           "All future queries will use the updated schema.",
       );
     } catch (err: unknown) {

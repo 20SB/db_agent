@@ -15,7 +15,7 @@ import { estimateQueryCost } from "./costEstimator";
 import { formatResult } from "./formatter";
 import { smartRetry } from "./smartRetry";
 import { getLearningsForPrompt } from "./learnings";
-import { syncSchemaFromDB } from "./schemaSync";
+import { syncSchemaFromDB, loadSavedSchema, saveSchema } from "./schemaSync";
 
 // ── Provider factory ────────────────────────────────────────────────
 export function createProvider(): LLMProvider {
@@ -33,15 +33,23 @@ export function createProvider(): LLMProvider {
 // ── Schema loader ───────────────────────────────────────────────────
 export function loadSchema(): string {
   const schemaPath = process.env.SCHEMA_PATH;
-  if (!schemaPath) {
-    console.warn("[warn] SCHEMA_PATH not set — using empty schema context.");
-    return "-- no schema provided --";
+  if (schemaPath) {
+    const resolved = path.resolve(schemaPath);
+    if (!fs.existsSync(resolved)) {
+      throw new Error(`Schema file not found: ${resolved}`);
+    }
+    return fs.readFileSync(resolved, "utf-8");
   }
-  const resolved = path.resolve(schemaPath);
-  if (!fs.existsSync(resolved)) {
-    throw new Error(`Schema file not found: ${resolved}`);
+
+  // Fall back to previously synced schema
+  const saved = loadSavedSchema();
+  if (saved) {
+    console.log("[schema] Loaded previously synced schema from disk.");
+    return saved;
   }
-  return fs.readFileSync(resolved, "utf-8");
+
+  console.warn("[warn] SCHEMA_PATH not set and no synced schema found — using empty schema context.");
+  return "-- no schema provided --";
 }
 
 // ── Prompt helper ───────────────────────────────────────────────────
@@ -244,6 +252,7 @@ async function main(): Promise<void> {
   if (syncFlag) {
     console.log("[schema] Syncing from live database...");
     schema = await syncSchemaFromDB();
+    saveSchema(schema);
   } else {
     schema = loadSchema();
   }
