@@ -1,7 +1,7 @@
 import * as fs from "fs";
-import * as path from "path";
+import { getDataDir } from "./dataDir";
 
-const LEARNINGS_PATH = path.resolve(__dirname, "../learnings.json");
+const LEARNINGS_PATH = () => `${getDataDir()}/learnings.json`;
 
 export interface Learning {
   hint: string;
@@ -17,9 +17,9 @@ interface LearningsFile {
 
 // ── Load all learnings from disk ────────────────────────────────────
 export function loadLearnings(): Learning[] {
-  if (!fs.existsSync(LEARNINGS_PATH)) return [];
+  if (!fs.existsSync(LEARNINGS_PATH())) return [];
   try {
-    const raw = fs.readFileSync(LEARNINGS_PATH, "utf-8");
+    const raw = fs.readFileSync(LEARNINGS_PATH(), "utf-8");
     const data: LearningsFile = JSON.parse(raw);
     return data.learnings || [];
   } catch {
@@ -31,7 +31,7 @@ export function loadLearnings(): Learning[] {
 export function addLearning(learning: Omit<Learning, "timestamp">): void {
   const all = loadLearnings();
   all.push({ ...learning, timestamp: new Date().toISOString() });
-  fs.writeFileSync(LEARNINGS_PATH, JSON.stringify({ learnings: all }, null, 2), "utf-8");
+  fs.writeFileSync(LEARNINGS_PATH(), JSON.stringify({ learnings: all }, null, 2), "utf-8");
   console.log(`[learnings] Saved: "${learning.hint}"`);
 }
 
@@ -76,6 +76,6 @@ export function removeLearning(index: number): boolean {
   const all = loadLearnings();
   if (index < 1 || index > all.length) return false;
   all.splice(index - 1, 1);
-  fs.writeFileSync(LEARNINGS_PATH, JSON.stringify({ learnings: all }, null, 2), "utf-8");
+  fs.writeFileSync(LEARNINGS_PATH(), JSON.stringify({ learnings: all }, null, 2), "utf-8");
   return true;
 }

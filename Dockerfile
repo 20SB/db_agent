@@ -24,6 +24,11 @@ COPY --from=builder /app/dist ./dist
 # Copy schema file(s) if present — mount or set SCHEMA_PATH at runtime
 COPY *.sql ./
 
+# Persistent data directory for learnings.json and schema_synced.sql
+RUN mkdir -p /app/data
+ENV DATA_DIR=/app/data
+VOLUME /app/data
+
 # Cloud Run provides PORT env var (default 8080)
 ENV PORT=8080
 EXPOSE 8080

@@ -1,9 +1,9 @@
 import * as fs from "fs";
-import * as path from "path";
 import { getPool } from "./db";
+import { getDataDir } from "./dataDir";
 
 // ── Schema file persistence path ─────────────────────────────────────
-const SAVED_SCHEMA_PATH = path.resolve(__dirname, "../schema_synced.sql");
+const SAVED_SCHEMA_PATH = () => `${getDataDir()}/schema_synced.sql`;
 
 // ── Parse table names and their columns from DDL text ────────────────
 export interface TableInfo {
@@ -126,13 +126,15 @@ export function formatDiff(diff: SchemaDiff): string {
 
 // ── Save / Load synced schema to file ────────────────────────────────
 export function saveSchema(ddl: string): void {
-  fs.writeFileSync(SAVED_SCHEMA_PATH, ddl, "utf-8");
-  console.log(`[schema-sync] Saved schema to ${SAVED_SCHEMA_PATH}`);
+  const p = SAVED_SCHEMA_PATH();
+  fs.writeFileSync(p, ddl, "utf-8");
+  console.log(`[schema-sync] Saved schema to ${p}`);
 }
 
 export function loadSavedSchema(): string | null {
-  if (fs.existsSync(SAVED_SCHEMA_PATH)) {
-    return fs.readFileSync(SAVED_SCHEMA_PATH, "utf-8");
+  const p = SAVED_SCHEMA_PATH();
+  if (fs.existsSync(p)) {
+    return fs.readFileSync(p, "utf-8");
   }
   return null;
 }
